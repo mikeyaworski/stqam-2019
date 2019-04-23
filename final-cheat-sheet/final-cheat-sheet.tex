@@ -704,6 +704,85 @@ You can also combine predicates with {\tt and}, {\tt or}, etc.
 e.g. {\tt //title[../price < 35 or @lang="en"]}. 
 {\tt *} works as you might expect.
 
+\section*{Using XPath to write PMD Rules}
+Last time, we saw how some notions on how to use XPath in general.
+Today, we'll talk about XPath and PMD. 
+
+Here's a rule ensuring that while statements must not contain directly contain
+other statements:
+
+{\tt //WhileStatement[not(Statement/Block)]}
+
+This rule matches {\tt WhileStatement}s whose {\tt Statement} child
+does not contain a {\tt Block}.
+
+We can detect {\tt Logger} variables. Note the use of {\tt @Image}. We are matching {\tt VariableDeclarator}s whose type is {\tt Logger}:
+{\small \begin{verbatim}
+//VariableDeclarator[../Type/ReferenceType/ClassOrInterfaceType[@Image='Logger']]
+\end{verbatim}
+}
+
+But we really want class definitions which contain more than one 
+variable of type {\tt Logger}. 
+\noindent
+{\small \begin{verbatim}
+//ClassOrInterfaceDeclaration
+    [count(.//VariableDeclarator
+      [../Type/ReferenceType/ClassOrInterfaceType[@Image='Logger']])>1]
+\end{verbatim}
+
+\section*{The Landscape of Testing and Static Analysis Tools}
+Here's a survey of your options:
+\begin{itemize}[noitemsep]
+    \item manual testing;
+    \item running a JUnit test suite, manually generated;
+    \item running automatically-generated tests;
+    \item running static analysis tools.
+\end{itemize}
+We'll examine several points on this continuum.
+Some examples:
+\begin{itemize}[noitemsep]
+    \item Coverity: a static analysis tool used by 900+ companies,
+      including BlackBerry, Mozilla, etc.
+    \item Microsoft requires Windows device drivers
+      to pass their Static Driver Verifier for certification.
+\end{itemize}
+
+\section*{Linters}
+
+In statically-typed languages, like C, compiler guarantees invariant that if code compiles, all symbols resolve.
+
+For JavaScript and similar languages, need a linter to make that invariant. Cannot say much of anything about symbols resolving without a linter.
+
+Use linters which block deployments if they don't pass!
+
+\section*{FindBugs and False Positives}
+
+We've seen two tools so far: PMD and jshint. These tools both operate on
+Abstract Syntax Trees and ensure relatively shallow program properties.
+
+\paragraph{FindBugs.} This tool is somewhat deeper than PMD. FindBugs is an 
+open-source static \emph{bytecode} analyzer for Java out of the
+University of Maryland.  A key difference is that it performs static
+analysis at Java bytecode level rather than AST level. It's therefore
+harder to write FindBugs rules.
+
+FindBugs finds bug patterns like:
+\begin{itemize}[noitemsep]
+    \item off-by-one;
+    \item null pointer dereference;
+    \item ignored {\tt read()} return value;
+    \item ignored return value (immutable classes);
+    \item uninitialized read in constructor;
+    \item and more\ldots
+\end{itemize}
+
+\paragraph{False positives.}
+FindBugs, like all static analysis tools, gives some false positives.
+(The course project has a question about false positives.) In general, they
+occur because the analysis tool is not powerful enough. Because of the
+halting problem, there can be no all-powerful tool.
+
 \section*{Static versus Dynamic Analysis}
 {\tt valgrind} detects memory leaks dynamically.
 
@@ -744,5 +823,190 @@ than statically. Consider the question of whether a line of code is reachable
 or not. This is relatively easy to approximate statically (that's what dead
 code elimination does), but quite hard to check dynamically, since it depends
 heavily on finding appropriate program inputs.
+
+\section*{Dynamic Analyses}
+We'll continue talking about generic properties, but this time we'll talk about
+dynamic verification of these properties.
+
+\subsection*{Memory errors}
+Let's start by talking about leaks and other memory errors.
+We saw static detection of leaks with Facebook Infer.
+Valgrind's Memcheck tool and Clang's Address Sanitizer detect memory errors
+dynamically.
+
+
+Valgrind's Memcheck detects the following errors:
+\begin{itemize}[noitemsep]
+\item Illegal reads/writes: Memcheck complains about accesses to memory that
+the program should not be accessing (e.g. not returned from a {\tt malloc}, or
+below the stack pointer).
+\item Reads of uninitialized variables: Memcheck tells you about reads of
+memory that has never been initialized, if the program prints out the resulting values.
+\item Illegal/wrong frees: Of course, you're not allowed to free memory that
+you didn't get from a memory allocation function, so Memcheck tells you.
+It also tells you when you use {\tt free()} on something you got from {\tt new[]}.
+\item Overlapping source/destination for memory moves.
+\item Fishy argument values: You probably don't mean to request either -3
+bytes or more than $2^{63}$ bytes.
+\item Memory leaks: Memcheck tells you when you have memory that didn't get freed
+but that you no longer have any pointers to.
+\end{itemize}
+You will pay a significant performance penalty when using Valgrind; Memcheck typically
+comes with a 10$\times$--50$\times$ slowdown. This is usable for bug diagnosis but
+obviously not for production.
+
+The AddressSanitizer tool, supported by both clang and gcc,
+also detects memory errors. These errors are similar to those that
+Valgrind can detect. The technology is different, but the goals are
+similar. Because it uses different implementation technology, it runs
+much more quickly than Valgrind, with a reported typical slowdown of
+2$\times$.
+
+AddressSanitizer finds the following errors:
+\vspace*{-1em}
+\begin{itemize}[noitemsep]
+\item    Out-of-bounds accesses to heap, stack and globals
+\item    Use-after-free
+\item    Use-after-return
+\item    Use-after-scope
+\item    Double-free, invalid free
+\item    Memory leaks (experimental)
+\end{itemize}
+\vspace*{-1em}
+
+Note that Valgrind may return false positives, while AddressSanitizer has a design goal 
+of returning no false positives. In fact, ASan aborts the program whenever it encounters
+a memory problem. You're supposed to fix it before proceeding. Of course, ASan might miss 
+some problems.
+
+\paragraph{Implementation Techniques.}
+Valgrind and ASan use different techniques, hence yield different results.
+Valgrind emulates a CPU and checks, at every memory access, whether that
+access is legitimate or not. ASan, on the other hand, rewrites relevant memory accesses
+at compile-time to call a checking library. It turns out that calling a library is cheaper
+than emulating the CPU.
+
+Conceptually, ASan maintains shadow memory---
+metadata about where the program is allowed to access (or not).
+Then, it replaces the {\tt malloc()} and {\tt free()}
+calls with its own versions; these versions update shadow memory and indicate
+that allocated memory is OK to access, unallocated memory not OK. 
+Finally, every memory access in the program gets replaced with a checked access:
+\begin{lstlisting}
+if (IsPoisoned(address)) {
+  ReportError(address, kAccessSize, kIsWrite);
+}
+*address = ...;  // or: ... = *address;
+\end{lstlisting}
+This is not so different from what Java does to check array accesses, for instance,
+but applies much more generally, to every memory access in the program.
+
+\subsection*{Race detectors}
+Valgrind also has a race detection tool, Helgrind. This tool dynamically detects
+memory that is concurrently accessed by two threads. Such accesses are fine as long
+as they are controlled by a lock. At runtime, Helgrind knows which locks are held.
+If the program does not hold enough locks, then Helgrind flags a memory error.
+
+\hspace*{.2\textwidth}\begin{minipage}{.4\textwidth}
+\begin{lstlisting}
+  acquire(lock1);
+  read(x);
+  release(lock1);
+\end{lstlisting}
+\end{minipage}\
+\begin{minipage}{.4\textwidth}
+\begin{lstlisting}
+  acquire(lock2);
+  write(x); // different lock!
+  release(lock2);
+\end{lstlisting}
+\end{minipage}
+
+\section*{One more dynamic tool: Randoop}
+    Key Idea:
+    ``Writing tests is a difficult and time-consuming activity, 
+  and yet it is a crucial part of good software engineering. 
+  Randoop automatically generates unit tests for Java classes.''
+
+  Randoop generates random sequence of method calls, 
+  looking for object contract violations.
+  
+  To use it, simply point it at a program \& let it run.
+
+  Randoop discards bad method sequences 
+(e.g. illegal argument exceptions). It remembers method sequences that create complex objects,
+    and sequences that result in object contract violations.
+
+\section*{Course Summary}
+Many of the topics in this course are fairly straightforward. I hope that seeing them
+all in one place can help you make connections between the different topics.
+
+\subsection*{Introduction}
+We started by talking about \emph{faults}, \emph{errors}, and \emph{failures}.
+We also discussed \emph{static} versus \emph{dynamic} approaches, something which recurred
+throughout the course. 
+
+\subsection*{Defining Test Suites}
+Before defining test suites, I thought it was important for everyone to understand
+\emph{exploratory testing}. We then moved on to \emph{statement} and \emph{branch}
+coverage, which require you to understand \emph{control-flow graphs}. Alternatively,
+you might have a \emph{Finite State Machine} and want to build test suites to cover
+round-trips in your FSM.
+
+Grammar-based approaches are also important, particularly \emph{fuzzing} for security-based
+properties. (Don't forget to try out the american fuzzy lop tool). We can also generate
+inputs from a grammar.
+
+\emph{Mutation testing} is probably the most difficult concept in the course. Recall that
+it's indirect: you're trying to make your test suite better by making sure that it can actually
+detect defects in the code.
+
+We also looked at research which empirically evaluated best-case coverage of well-tested code
+(JUnit, can reach 93\%; 80\% is usual benchmark); which evaluated the usefulness of mutation
+testing (it actually works); and which evaluated the usefulness of coverage (not very, as a
+goal in itself).
+
+\subsection*{Engineering Test Suites}
+We then moved on to discuss how to engineer test suites as artifacts. There's a lot more
+that I would have liked to talk about, like ensuring testability and test smells. But here's
+what we did discuss.
+
+First, we talked about why you need good tests---it enables you to fearlessly modify your code
+without worrying about breaking it (``eat your vegetables!'') We then talked about some
+\emph{test design principles}. Moving on to more concrete points, we saw how Selenium let you
+write tests for webapps. \emph{Regression testing} is also a key use for test suites; they should
+be fast and automated.
+
+Tests themselves should be \emph{self-checking}. They might verify either \emph{state} or
+\emph{behaviour} (using \emph{mock objects}). They should be hooked up to a \emph{continuous
+integration} system and should not be \emph{flaky}.
+
+\subsection*{Tools}
+A fundamental distinction is between \emph{dynamic} and \emph{static} approaches. Dynamic approaches
+have perfect information about a limited set of runs; static approaches have approximations which
+are valid for all runs.
+
+We talked about bug-finding tools somewhat out of sequence to enable
+you to work on your project.  The fundamental idea behind Coverity is
+to find contradictions and suspicious usage patterns. Your project
+does the same, but at a simpler level.
+
+On to real tools, the first technique I talked about was still not a tool:
+\emph{code review}. Along the same lines, \emph{reporting bugs} is also important
+to talk about, but not strictly speaking a tool either.
+
+We finally continued with real tools: \emph{PMD} and \emph{FindBugs},
+which statically detect suspicious code patterns in Java source code
+and bytecode respectively. We also saw how to use PMD to run queries
+on your own codebases (using XPath expressions). {\tt jshint} is another
+tool in the same spirit, but it detects sketchiness in JavaScript
+(like undefined variables, which you can't even use in sane languages).
+\emph{Facebook Infer} uses more powerful static analysis to find memory
+leaks and null pointer dereferences, among others. All of these tools
+work on significant codebases.
+
+Finally, on the dynamic tool side, we talked about \emph{valgrind}
+and \emph{Address Sanitizer}, which detect memory errors at runtime
+by instrumenting the code.
 
 \end{document}
